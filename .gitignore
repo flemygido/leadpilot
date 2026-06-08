@@ -44,3 +44,4 @@ packages/db/generated/
 
 # Vercel
 .vercel/
+.vercel
