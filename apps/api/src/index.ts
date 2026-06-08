@@ -85,7 +85,7 @@ async function bootstrap() {
   fastify.get('/health', () => ({ status: 'ok', provider: provider.name }));
 
   // Start
-  const port = Number(process.env['API_PORT'] ?? 3001);
+  const port = Number(process.env['PORT'] ?? process.env['API_PORT'] ?? 3001);
   const host = process.env['API_HOST'] ?? '0.0.0.0';
   await fastify.listen({ port, host });
   logger.info({ port, host }, '🚀 LeadPilot API running');
