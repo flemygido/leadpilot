@@ -1,0 +1,12 @@
+{
+  "framework": "nextjs",
+  "buildCommand": "cd ../.. && npm install && npm run build --workspace=apps/web",
+  "outputDirectory": "apps/web/.next",
+  "installCommand": "npm install",
+  "env": {
+    "DATABASE_URL": "@database_url",
+    "AUTH_SECRET": "@auth_secret",
+    "INTERNAL_API_SECRET": "@internal_api_secret",
+    "NEXT_PUBLIC_API_URL": "@next_public_api_url"
+  }
+}

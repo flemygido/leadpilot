@@ -1,0 +1,340 @@
+// LeadPilot Prisma schema
+// Run: npm run db:migrate (dev) or npm run db:migrate:prod (production)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum LeadState {
+  NEW
+  GREETED
+  QUALIFYING
+  QUALIFIED_HOT
+  QUALIFIED_COLD
+  NURTURING
+  VISIT_OFFERED
+  VISIT_SCHEDULED
+  HANDED_OFF
+  CLOSED_WON
+  CLOSED_LOST
+}
+
+enum LeadClassification {
+  HOT
+  NURTURE
+  UNSCORED
+}
+
+enum MessageRole {
+  lead
+  assistant
+  agent
+  system
+}
+
+enum MessageDirection {
+  inbound
+  outbound
+}
+
+enum FollowUpStatus {
+  pending
+  sent
+  skipped
+  failed
+}
+
+enum SiteVisitStatus {
+  offered
+  confirmed
+  cancelled
+  completed
+}
+
+enum NotificationType {
+  hot_lead
+  handoff
+  daily_summary
+  site_visit_booked
+}
+
+// ─── User (auth account — 1:1 with Agent) ────────────────────────────────────
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  agentId      String    @unique @map("agent_id")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  agent        Agent     @relation(fields: [agentId], references: [id])
+
+  @@map("users")
+}
+
+// ─── Agent ───────────────────────────────────────────────────────────────────
+
+model Agent {
+  id              String    @id @default(cuid())
+  name            String
+  email           String    @unique
+  phone           String    // WhatsApp number for notifications
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  leads           Lead[]
+  siteVisits      SiteVisit[]
+  notifications   Notification[]
+  availabilities  AgentAvailability[]
+  properties      Property[]
+  user            User?
+
+  @@map("agents")
+}
+
+// ─── AgentAvailability ────────────────────────────────────────────────────────
+
+model AgentAvailability {
+  id          String   @id @default(cuid())
+  agentId     String   @map("agent_id")
+  dayOfWeek   Int      // 0=Sunday … 6=Saturday
+  startTime   String   // "09:00"
+  endTime     String   // "18:00"
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  agent       Agent    @relation(fields: [agentId], references: [id])
+
+  @@map("agent_availabilities")
+}
+
+// ─── Property ────────────────────────────────────────────────────────────────
+
+model Property {
+  id           String      @id @default(cuid())
+  title        String
+  description  String?
+  propertyType String      @map("property_type")   // apartment | villa | plot | commercial
+  bhk          Int?
+  areaSqft     Float?      @map("area_sqft")
+  priceMin     Float       @map("price_min")
+  priceMax     Float       @map("price_max")
+  location     String                              // area/locality — used for AI matching
+  address      String?                             // full street address — shown to customers
+  status       String      @default("available")  // available | negotiating | sold
+  isAvailable  Boolean     @default(true)          @map("is_available")
+  amenities    String[]
+
+  // RERA compliance (Maharashtra/Karnataka require registration number in all marketing)
+  reraNumber   String?     @map("rera_number")
+
+  ownerName    String?     @map("owner_name")
+  ownerPhone   String?     @map("owner_phone")
+  ownerEmail   String?     @map("owner_email")
+
+  agentId      String?     @map("agent_id")
+  agent        Agent?      @relation(fields: [agentId], references: [id])
+
+  siteVisits   SiteVisit[]
+
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt      @map("updated_at")
+
+  @@map("properties")
+}
+
+// ─── Lead ────────────────────────────────────────────────────────────────────
+
+model Lead {
+  id                    String              @id @default(cuid())
+  agentId               String              @map("agent_id")
+  phone                 String
+  name                  String?
+  state                 LeadState           @default(NEW)
+  classification        LeadClassification  @default(UNSCORED)
+  score                 Int                 @default(0)
+  aiPaused              Boolean             @default(false) @map("ai_paused")
+
+  // Consent (DPDP Act + WhatsApp Business Policy compliance)
+  consent               Boolean             @default(false)
+  consentSource         String?             @map("consent_source") // "explicit_optin" | "portal_form" | "manual"
+  consentAt             DateTime?           @map("consent_at")
+
+  // 24-hour customer-care window tracking
+  lastInboundAt         DateTime?           @map("last_inbound_at")
+
+  // Source of lead entry — tracks which portal each record came from
+  source                String              @default("inbound") // "inbound" | "99acres" | "magicbricks" | "housing" | "manual"
+  portalLeadId          String?             @map("portal_lead_id") // portal's own ID for dedup
+
+  createdAt             DateTime            @default(now()) @map("created_at")
+  updatedAt             DateTime            @updatedAt @map("updated_at")
+
+  agent                 Agent               @relation(fields: [agentId], references: [id])
+  conversation          Conversation?
+  qualificationResult   QualificationResult?
+  followUpJobs          FollowUpJob[]
+  siteVisits            SiteVisit[]
+  notifications         Notification[]
+  stateTransitions      StateTransition[]
+  conversationFlags     ConversationFlag[]
+
+  // Non-unique index — same phone can arrive from multiple portals
+  @@index([phone])
+  @@map("leads")
+}
+
+// ─── StateTransition ─────────────────────────────────────────────────────────
+
+model StateTransition {
+  id          String     @id @default(cuid())
+  leadId      String     @map("lead_id")
+  fromState   LeadState  @map("from_state")
+  toState     LeadState  @map("to_state")
+  reason      String?
+  createdAt   DateTime   @default(now()) @map("created_at")
+
+  lead        Lead       @relation(fields: [leadId], references: [id])
+
+  @@map("state_transitions")
+}
+
+// ─── Conversation ─────────────────────────────────────────────────────────────
+
+model Conversation {
+  id          String    @id @default(cuid())
+  leadId      String    @unique @map("lead_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  lead        Lead      @relation(fields: [leadId], references: [id])
+  messages    Message[]
+
+  @@map("conversations")
+}
+
+// ─── Message ─────────────────────────────────────────────────────────────────
+
+model Message {
+  id                String           @id @default(cuid())
+  conversationId    String           @map("conversation_id")
+  role              MessageRole
+  direction         MessageDirection
+  body              String
+  providerMessageId String?          @map("provider_message_id") // Meta/Twilio message ID
+  createdAt         DateTime         @default(now()) @map("created_at")
+
+  conversation      Conversation     @relation(fields: [conversationId], references: [id])
+
+  @@map("messages")
+}
+
+// ─── QualificationResult ──────────────────────────────────────────────────────
+
+model QualificationResult {
+  id                    String   @id @default(cuid())
+  leadId                String   @unique @map("lead_id")
+
+  intent                String   @default("unknown") // buy | rent | unknown
+  propertyType          String   @default("unknown") @map("property_type") // apartment | villa | plot | commercial | unknown
+  bhk                   Int?
+  budgetMin             Float?   @map("budget_min")
+  budgetMax             Float?   @map("budget_max")
+  preferredLocations    String[] @map("preferred_locations")
+  timeline              String   @default("unknown") // immediate | 1_3_months | 3_6_months | exploring | unknown
+  financing             String   @default("unknown") // loan | cash | unknown
+  name                  String?
+  preferredContactTime  String?  @map("preferred_contact_time")
+  notes                 String?
+
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  lead                  Lead     @relation(fields: [leadId], references: [id])
+
+  @@map("qualification_results")
+}
+
+// ─── FollowUpJob ──────────────────────────────────────────────────────────────
+
+model FollowUpJob {
+  id              String         @id @default(cuid())
+  leadId          String         @map("lead_id")
+  sequenceStep    Int            @map("sequence_step") // 1=Day1, 2=Day3, 3=Day7, 4=Day14
+  runAt           DateTime       @map("run_at")
+  status          FollowUpStatus @default(pending)
+  sentAt          DateTime?      @map("sent_at")
+  failureReason   String?        @map("failure_reason")
+  createdAt       DateTime       @default(now()) @map("created_at")
+
+  lead            Lead           @relation(fields: [leadId], references: [id])
+
+  @@index([status, runAt])
+  @@map("follow_up_jobs")
+}
+
+// ─── SiteVisit ────────────────────────────────────────────────────────────────
+
+model SiteVisit {
+  id              String          @id @default(cuid())
+  leadId          String          @map("lead_id")
+  agentId         String          @map("agent_id")
+  scheduledAt     DateTime        @map("scheduled_at")
+  durationMinutes Int             @default(60) @map("duration_minutes")
+  status          SiteVisitStatus @default(offered)
+  notes           String?
+  confirmedAt     DateTime?       @map("confirmed_at")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+
+  propertyId      String?         @map("property_id")
+
+  lead            Lead            @relation(fields: [leadId], references: [id])
+  agent           Agent           @relation(fields: [agentId], references: [id])
+  property        Property?       @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+
+  @@map("site_visits")
+}
+
+// ─── ConversationFlag ─────────────────────────────────────────────────────────
+
+model ConversationFlag {
+  id          String    @id @default(cuid())
+  leadId      String    @map("lead_id")
+  severity    String    // 'low' | 'medium' | 'high'
+  category    String    // 'wrong_action' | 'repeated_question' | 'state_jump' | 'missing_context'
+  description String
+  snippet     String?
+  resolvedAt  DateTime? @map("resolved_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  lead        Lead      @relation(fields: [leadId], references: [id])
+
+  @@map("conversation_flags")
+}
+
+// ─── Notification ─────────────────────────────────────────────────────────────
+
+model Notification {
+  id          String           @id @default(cuid())
+  agentId     String           @map("agent_id")
+  leadId      String?          @map("lead_id")
+  type        NotificationType
+  title       String
+  body        String
+  sentAt      DateTime?        @map("sent_at")
+  readAt      DateTime?        @map("read_at")
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  agent       Agent            @relation(fields: [agentId], references: [id])
+  lead        Lead?            @relation(fields: [leadId], references: [id])
+
+  @@map("notifications")
+}
